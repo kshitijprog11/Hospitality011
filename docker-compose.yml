@@ -1,0 +1,166 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  database:
+    image: postgres:15-alpine
+    container_name: feedback-database
+    environment:
+      POSTGRES_DB: feedback_platform
+      POSTGRES_USER: feedback_user
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-feedback_password_123}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U feedback_user -d feedback_platform"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - feedback-network
+
+  # Redis for caching and background tasks
+  redis:
+    image: redis:7-alpine
+    container_name: feedback-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_password_123}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - feedback-network
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: feedback-backend
+    environment:
+      # Database
+      DATABASE_URL: postgresql://feedback_user:${DATABASE_PASSWORD:-feedback_password_123}@database:5432/feedback_platform
+      DATABASE_HOST: database
+      DATABASE_PORT: 5432
+      DATABASE_NAME: feedback_platform
+      DATABASE_USER: feedback_user
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-feedback_password_123}
+      
+      # Redis
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password_123}@redis:6379/0
+      
+      # API Keys (set these in production)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      HUGGING_FACE_API_KEY: ${HUGGING_FACE_API_KEY:-}
+      
+      # Security
+      SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-your-jwt-secret-change-in-production}
+      
+      # Application
+      DEBUG: ${DEBUG:-False}
+      ALLOWED_HOSTS: localhost,127.0.0.1,frontend
+      CORS_ORIGINS: http://localhost:3000,http://localhost:80,http://frontend
+      
+      # NLP Configuration
+      SENTIMENT_THRESHOLD_NEGATIVE: -0.5
+      SENTIMENT_THRESHOLD_POSITIVE: 0.5
+      FLAGGED_KEYWORDS: urgent,emergency,terrible,awful,disgusting,worst
+      
+      # Notifications
+      ENABLE_EMAIL_ALERTS: ${ENABLE_EMAIL_ALERTS:-True}
+      ENABLE_BROWSER_NOTIFICATIONS: True
+      ALERT_THRESHOLD_SENTIMENT: -0.7
+    volumes:
+      - ./backend:/app
+      - backend_models:/app/models_cache
+    ports:
+      - "8000:8000"
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - feedback-network
+
+  # Frontend Application
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: feedback-frontend
+    environment:
+      VITE_API_URL: http://localhost:8000/api
+    ports:
+      - "80:80"
+      - "3000:80"  # Alternative port for development
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - feedback-network
+
+  # Background worker for processing tasks (optional)
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: feedback-worker
+    command: celery -A app.core.celery worker --loglevel=info
+    environment:
+      # Same environment as backend
+      DATABASE_URL: postgresql://feedback_user:${DATABASE_PASSWORD:-feedback_password_123}@database:5432/feedback_platform
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password_123}@redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      HUGGING_FACE_API_KEY: ${HUGGING_FACE_API_KEY:-}
+      SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
+    volumes:
+      - ./backend:/app
+      - backend_models:/app/models_cache
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - feedback-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  backend_models:
+    driver: local
+
+networks:
+  feedback-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
