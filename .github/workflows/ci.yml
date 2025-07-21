@@ -113,7 +113,7 @@ jobs:
         npm run build
 
     - name: Upload frontend artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: frontend-build
         path: frontend/dist/
@@ -176,7 +176,7 @@ jobs:
         npm audit --audit-level moderate || true
 
     - name: Upload security scan results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: security-reports
         path: |
